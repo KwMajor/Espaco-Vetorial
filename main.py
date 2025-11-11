@@ -1,3 +1,34 @@
+"""main.py
+
+Ferramenta para testar (por amostragem probabilística) se um conjunto de vetores
+ou matrizes com operações de adição e multiplicação escalar satisfaz os 8 axiomas
+de espaço vetorial. O usuário pode escolher entre três modos de operação:
+
+1. Modo direto (não interativo): gera elementos aleatórios, ou lê listas via JSON.
+2. Modo interativo completo (--interativo): pergunta passo a passo dimensões, tolerâncias,
+     elementos, zero e operações (inclui opção para lambdas customizadas).
+3. Modo de entrada manual simplificada (--entrada-manual): foca em digitar somente
+     números dos vetores/matrizes, zero e escolher operação.
+
+Arquitetura rápida:
+- VectorSpaceTester: encapsula a lógica dos 8 axiomas e registra resultados.
+- Helpers de parsing: criação de elementos, comparação numérica com tolerâncias.
+- Presets de operações: 'padrao', 'soma_deslocada' e 'escalar_estranho' permitem observar
+    sucesso/falha de axiomas intencionalmente.
+- Funções de prompt: abstraem entrada robusta (inteiros, floats, vetores, matrizes).
+
+Decisões principais:
+- Usa NumPy para geração e comparação (allclose) por estabilidade numérica.
+- Inverso aditivo calculado como sm(u, -1) assumindo multiplicação escalar padrão.
+    (Nos presets que deformam a soma ou escalar, isso provoca falhas esperadas.)
+- Comparação _close tenta degradar para igualdade simples se não for array NumPy.
+
+Limitações:
+- Probabilístico: não garante prova formal; aumentar --ensaios para maior confiança.
+- Presets não substituem análise teórica; servem para demonstrar quebra de axiomas.
+
+"""
+
 import argparse
 import json
 from typing import Callable, Any, List, Tuple
@@ -52,19 +83,30 @@ class VectorSpaceTester:
         self.inv = lambda u: self.sm(u, -1)
 
     def _close(self, a: Any, b: Any) -> bool:
+        """Compara dois elementos considerando tolerâncias rtol/atol.
+
+        Tenta primeiro via numpy.allclose. Caso 'a' ou 'b' não sejam arrays NumPy
+        (ou provoquem exceções), converte para np.array e aplica um critério manual;
+        no último caso, recorre à igualdade direta.
+        """
         try:
             return np.allclose(a, b, rtol=self.rtol, atol=self.atol)
         except Exception:
-            # Tenta comparar objetos não numpy (ex.: números puros)
             try:
+                # Critério manual: max(|a-b|) <= atol + rtol*max(|b|)
                 return abs(np.array(a) - np.array(b)).max() <= (
                     self.atol + self.rtol * abs(np.array(b)).max()
                 )
             except Exception:
+                # Último recurso para tipos não numéricos.
                 return a == b
 
     def check_axiom(self, axiom_func, axiom_name):
-        """Função auxiliar para testar um único axioma N vezes."""
+        """Executa 'axiom_func' num loop de 'num_trials' e registra PASSOU/FALHOU.
+
+        Se qualquer tentativa falhar, marca o axioma como FALHOU e interrompe cedo.
+        Captura exceções para registrar erros de dimensão ou lógica.
+        """
         try:
             for _ in range(self.num_trials):
                 if not axiom_func():
@@ -80,23 +122,28 @@ class VectorSpaceTester:
     # --- Definição dos 8 Axiomas ---
 
     def a1_commutative(self):
+        # u + v == v + u
         u, v = self.gen(), self.gen()
         return self._close(self.add(u, v), self.add(v, u))
 
     def a2_associative_add(self):
+        # (u+v)+w == u+(v+w)
         u, v, w = self.gen(), self.gen(), self.gen()
         return self._close(self.add(self.add(u, v), w), self.add(u, self.add(v, w)))
 
     def a3_zero_element(self):
+        # u + 0 == u
         u = self.gen()
         return self._close(self.add(u, self.zero), u)
 
     def a4_inverse_element(self):
+        # u + (-u) == 0 (usa inverso como -1 * u)
         u = self.gen()
         neg_u = self.inv(u)
         return self._close(self.add(u, neg_u), self.zero)
 
     def a5_distributive_scalar_vector(self):
+        # k*(u+v) == k*u + k*v
         k = float(np.random.randn())
         u, v = self.gen(), self.gen()
         lhs = self.sm(self.add(u, v), k)
@@ -104,6 +151,7 @@ class VectorSpaceTester:
         return self._close(lhs, rhs)
 
     def a6_distributive_scalar_scalar(self):
+        # (k+m)*u == k*u + m*u
         k, m = float(np.random.randn()), float(np.random.randn())
         u = self.gen()
         lhs = self.sm(u, k + m)
@@ -111,6 +159,7 @@ class VectorSpaceTester:
         return self._close(lhs, rhs)
 
     def a7_associative_scalar(self):
+        # (k*m)*u == k*(m*u)
         k, m = float(np.random.randn()), float(np.random.randn())
         u = self.gen()
         lhs = self.sm(u, k * m)
@@ -118,13 +167,18 @@ class VectorSpaceTester:
         return self._close(lhs, rhs)
 
     def a8_identity_scalar(self):
+        # 1*u == u
         u = self.gen()
         return self._close(self.sm(u, 1), u)
 
     # --- Função Principal ---
 
     def test(self) -> bool:
-        """Roda todos os 8 testes de axiomas."""
+        """Executa os 8 axiomas, imprime resultados e retorna True se todos PASSARAM.
+
+        Estratégia: avalia cada axioma com 'num_trials' amostras aleatórias.
+        Falhas em qualquer tentativa interrompem o teste daquele axioma (curto-circuito).
+        """
         print(
             f"Iniciando teste de Espaço Vetorial ({self.num_trials} tentativas por axioma) "
             f"com rtol={self.rtol}, atol={self.atol}..."
@@ -164,6 +218,10 @@ class VectorSpaceTester:
 # -------------------- CLI & Utilidades --------------------
 
 def _shape_from_args(args) -> Tuple[int, ...]:
+    """Retorna o shape lógico a partir dos argumentos.
+
+    vetor => (dim,), matriz => (rows, cols)
+    """
     if args.tipo == "vetor":
         return (args.dim,)
     else:
@@ -171,17 +229,19 @@ def _shape_from_args(args) -> Tuple[int, ...]:
 
 
 def _zeros(shape: Tuple[int, ...]):
+    """Cria um elemento zero (vetor/matriz nulo) no shape fornecido."""
     return np.zeros(shape)
 
 
 def _random_gen(shape: Tuple[int, ...]):
+    """Retorna função geradora de elementos aleatórios com distribuição normal."""
     def gen():
         return np.random.randn(*shape)
-
     return gen
 
 
 def _parse_json_arg(name: str, value: str):
+    """Converte string JSON e levanta erro amigável incluindo o nome do parâmetro."""
     try:
         return json.loads(value)
     except Exception as e:
@@ -189,6 +249,7 @@ def _parse_json_arg(name: str, value: str):
 
 
 def _ensure_shape(arr: np.ndarray, shape: Tuple[int, ...], label: str):
+    """Valida se 'arr' tem o shape esperado, senão lança ValueError com rótulo."""
     if tuple(arr.shape) != tuple(shape):
         raise ValueError(
             f"Elemento '{label}' possui shape {arr.shape}, esperado {shape}."
@@ -196,14 +257,18 @@ def _ensure_shape(arr: np.ndarray, shape: Tuple[int, ...], label: str):
 
 
 def _elements_generator_from_list(elems: List[np.ndarray]):
+    """Retorna gerador que amostra uniformemente da lista de elementos fornecida."""
     def gen():
         idx = np.random.randint(0, len(elems))
         return elems[idx]
-
     return gen
 
 
 def _load_elements_from_args(args, shape: Tuple[int, ...]) -> List[np.ndarray]:
+    """Carrega elementos a partir de --elementos (string JSON) ou --elementos-arquivo.
+
+    Cada item deve ter o mesmo shape; converte para np.array(dtype=float).
+    """
     elems: List[np.ndarray] = []
     if args.elementos:
         data = _parse_json_arg("--elementos", args.elementos)
@@ -230,7 +295,7 @@ def _load_elements_from_args(args, shape: Tuple[int, ...]) -> List[np.ndarray]:
 
 
 def _resolve_operations(args, shape: Tuple[int, ...]):
-    # Presets seguros
+    # Presets seguros (cada ramo define add, sm). 'bias' usado apenas em soma_deslocada.
     if args.operacoes == "padrao":
         add = lambda u, v: u + v
         sm = lambda u, k: k * u
@@ -254,7 +319,7 @@ def _resolve_operations(args, shape: Tuple[int, ...]):
             raise ValueError(
                 "Para usar --add/--sm personalizados, adicione também --unsafe-eval."
             )
-        safe_globals = {"np": np}
+        safe_globals = {"np": np}  # exposição controlada de NumPy
         if args.add:
             try:
                 add = eval(args.add, safe_globals)
@@ -290,6 +355,7 @@ def _prompt_operation_startup() -> str:
 # -------------------- Modo Interativo --------------------
 
 def _prompt_yn(msg: str, default: bool = False) -> bool:
+    """Prompt para resposta sim/não com default, aceita variações ('s','sim','y')."""
     suf = "[S/n]" if default else "[s/N]"
     while True:
         resp = input(f"{msg} {suf}: ").strip().lower()
@@ -303,6 +369,7 @@ def _prompt_yn(msg: str, default: bool = False) -> bool:
 
 
 def _prompt_int(msg: str, default: int | None = None) -> int:
+    """Lê inteiro com validação e fallback opcional para valor default."""
     while True:
         txt = input(f"{msg}{' ['+str(default)+']' if default is not None else ''}: ").strip()
         if not txt and default is not None:
@@ -314,6 +381,7 @@ def _prompt_int(msg: str, default: int | None = None) -> int:
 
 
 def _prompt_float(msg: str, default: float | None = None) -> float:
+    """Lê float permitindo vírgula ou ponto como separador decimal."""
     while True:
         txt = input(f"{msg}{' ['+str(default)+']' if default is not None else ''}: ").strip()
         if not txt and default is not None:
@@ -325,11 +393,13 @@ def _prompt_float(msg: str, default: float | None = None) -> float:
 
 
 def _parse_numbers(line: str) -> List[float]:
+    """Extrai lista de floats de uma linha separada por espaços, vírgulas ou ponto-e-vírgula."""
     parts = [p for p in line.replace(';', ' ').replace(',', ' ').split() if p]
     return [float(p) for p in parts]
 
 
 def _input_vector(dim: int) -> np.ndarray:
+    """Lê um vetor de dimensão 'dim', repetindo até o número correto de valores."""
     while True:
         line = input(f"Informe {dim} números (separados por espaço ou vírgula): ")
         try:
@@ -343,6 +413,7 @@ def _input_vector(dim: int) -> np.ndarray:
 
 
 def _input_matrix(rows: int, cols: int) -> np.ndarray:
+    """Lê uma matriz linha a linha garantindo 'cols' valores por linha."""
     mat = np.zeros((rows, cols), dtype=float)
     for r in range(rows):
         while True:
@@ -360,7 +431,7 @@ def _input_matrix(rows: int, cols: int) -> np.ndarray:
 
 
 def _run_interactive() -> int:
-    print("=== Teste de Espaço Vetorial (Modo Interativo) ===")
+    print("=== Teste de Espaço Vetorial (Modo Interativo) ===")  # banner de modo
 
     # Tipo e dimensões
     tipo = input("Escolha o tipo [vetor/matriz] [vetor]: ").strip().lower() or "vetor"
@@ -445,7 +516,7 @@ def _run_manual_input(args) -> int:
 
     Usa 'args' somente para pegar flags já informadas; ignora gerador aleatório padrão e sempre usa elementos fornecidos/manual.
     """
-    print("=== Espaço Vetorial (Entrada Manual) ===")
+    print("=== Espaço Vetorial (Entrada Manual) ===")  # banner de modo
 
     # Tipo
     tipo = args.tipo if args.tipo else (input("Tipo [vetor/matriz] [vetor]: ").strip() or "vetor")
